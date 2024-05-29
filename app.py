@@ -12,32 +12,41 @@ patcher = patch_util.PatchUtil()
 
 
 def get_patch_response(code, patch, checksum, content=None):
-    return jsonify(
-        {"status": code, "patch": patch, "checksum": checksum, "content": content}
-    )
+    resp = {"status": code, "patch": patch, "checksum": checksum, "content": content}
+    print(resp)
+    return jsonify(resp)
 
 
 def get_register_response(code, content=None, user_id=None):
-    return jsonify({"status": code, "content": content, "userId": user_id})
+    resp = {"status": code, "content": content, "userId": user_id}
+    print(resp)
+    return jsonify(resp)
 
 
-@app.route("/register", methods=["GET"])
+def get_root_response(code, root, tree=None):
+    resp = {"status": code, "root": root, "tree": tree}
+    print(resp)
+    return jsonify(resp)
+
+
+@app.route("/register", methods=["POST"])
 @cross_origin()
 def register():
     data = request.json
     user_id = uuid.uuid4()
-    print(data)
     if not data:
         return get_register_response(400, "No request body found", "")
     if "path" not in data:
         return get_register_response(400, "Path not found", "")
-    if "userId" in data:
+    if "userId" in data and data["userId"] is not None and data["userId"] != "null":
         user_id = data["userId"]
     else:
         user_id = uuid.uuid4()
     path = data["path"]
+    root = data.get("root", None)
+    content = data.get("content", "")
 
-    server_shadow = patcher.register((path, user_id))
+    server_shadow = patcher.register((root, path, user_id), content)
 
     return get_register_response(200, server_shadow, user_id)
 
@@ -58,10 +67,18 @@ def applyPatch():
     elif "secretKey" not in data:
         return get_patch_response(400, "", "", "Secret key not found")
 
-    path = patch_util.TEST_FILE
+    path = data["path"]
     checksum = data["checksum"]
     patch_block = data["patch"]
-    key = (path, data["userId"])
+    root = data.get("root", None)
+    key = (root, path, data["userId"])
+
+    # Check for root
+    if root and not patcher.doesRootExist(root):
+        print(
+            f"Client {data['userId']} tried to access root {root} which does not exist"
+        )
+        return get_patch_response(404, "", "", "Root does not exist")
 
     try:
         shadow_content = patcher.getShadowContent(key)
@@ -70,6 +87,32 @@ def applyPatch():
     except RuntimeError as e:
         print(e)
         return get_patch_response(409, "", "", patcher.getShadowContent(key))
+    except patch_util.FileNotFoundError as e:
+        print(e)
+        return get_patch_response(404, "", "", "File not found")
+
+
+@app.route("/root", methods=["POST"])
+@cross_origin()
+def root():
+    data = request.json
+    if "userId" not in data:
+        return get_register_response(400, "User ID not provided", "")
+    if "secretKey" not in data:
+        return get_register_response(400, "Secret key not provided", "")
+    if (
+        "root" not in data
+        or data["root"] is None
+        or data["root"] == "null"
+        or data["root"] == "undefined"
+    ):
+        print("Create root")
+        root = uuid.uuid4()
+    else:
+        root = data["root"]
+
+    tree = patcher.idempotentCreateAndGetRoot(root)
+    return get_root_response(200, root, tree)
 
 
 # Run the app
