@@ -8,6 +8,7 @@ app = Flask(__name__)
 app.config["DEBUG"] = True
 # Run with `flask run --debugger --reload`
 
+API_VERSION = "v1"
 patcher = patch_util.PatchUtil()
 
 
@@ -29,7 +30,7 @@ def get_root_response(code, root, tree=None):
     return jsonify(resp)
 
 
-@app.route("/register", methods=["POST"])
+@app.route(f"/{API_VERSION}/register", methods=["POST"])
 @cross_origin()
 def register():
     data = request.json
@@ -38,20 +39,25 @@ def register():
         return get_register_response(400, "No request body found", "")
     if "path" not in data:
         return get_register_response(400, "Path not found", "")
+    if "root" not in data:
+        return get_register_response(400, "Root not found", "")
     if "userId" in data and data["userId"] is not None and data["userId"] != "null":
         user_id = data["userId"]
     else:
-        user_id = uuid.uuid4()
+        user_id = str(uuid.uuid4())
     path = data["path"]
     root = data.get("root", None)
     content = data.get("content", "")
 
-    server_shadow = patcher.register((root, path, user_id), content)
+    try:
+        server_shadow = patcher.register((root, path, user_id), content)
+        return get_register_response(200, server_shadow, user_id)
+    except patch_util.FileDeletedError as e:
+        print(e)
+        return get_register_response(409, "File is deleted", user_id)
 
-    return get_register_response(200, server_shadow, user_id)
 
-
-@app.route("/patch", methods=["POST"])
+@app.route(f"/{API_VERSION}/patch", methods=["POST"])
 @cross_origin()
 def applyPatch():
     data = request.json
@@ -83,16 +89,24 @@ def applyPatch():
     try:
         shadow_content = patcher.getShadowContent(key)
         outgoing_patches = patcher.applyPatch(key, checksum, patch_block)
-        return get_patch_response(200, outgoing_patches, shadow_content, None)
+        return get_patch_response(
+            200, outgoing_patches, patch_util.get_checksum(shadow_content), None
+        )
     except RuntimeError as e:
         print(e)
         return get_patch_response(409, "", "", patcher.getShadowContent(key))
+    except patch_util.FileDeletedError as e:
+        print(e)
+        return get_patch_response(409, "", "", "File is deleted")
     except patch_util.FileNotFoundError as e:
         print(e)
         return get_patch_response(404, "", "", "File not found")
+    except Exception as e:
+        print(e)
+        raise e
 
 
-@app.route("/root", methods=["POST"])
+@app.route(f"/{API_VERSION}/root", methods=["POST"])
 @cross_origin()
 def root():
     data = request.json
@@ -115,6 +129,31 @@ def root():
     return get_root_response(200, root, tree)
 
 
+@app.route(f"/{API_VERSION}/delete", methods=["POST"])
+@cross_origin()
+def delete():
+    data = request.json
+    if "userId" not in data:
+        return get_register_response(400, "User ID not provided", "")
+    if "secretKey" not in data:
+        return get_register_response(400, "Secret key not provided", "")
+    if "path" not in data:
+        return get_register_response(400, "Path not provided", "")
+    if "root" not in data:
+        return get_register_response(400, "Root not provided", "")
+
+    path = data["path"]
+    root = data["root"]
+    key = (root, path, data["userId"])
+    try:
+        shadow_content = patcher.getShadowContent(key)
+        patcher.delete(key)
+        return jsonify({"status": 200, "content": shadow_content})
+    except patch_util.FileNotFoundError as e:
+        print(e)
+        return jsonify({"status": 404, "content": "File not found"})
+
+
 # Run the app
 if __name__ == "__main__":
-    app.run()
+    app.run(host="0.0.0.0")

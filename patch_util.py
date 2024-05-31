@@ -1,3 +1,4 @@
+import hashlib
 import os
 from diff_match_patch import diff_match_patch
 
@@ -5,14 +6,36 @@ DATA_DIR = "data"
 # Temporarily hardcoding the test file
 TEST_FILE = "test.md"
 
+# Create the data directory if it doesn't exist
+os.makedirs(DATA_DIR, exist_ok=True)
+
 
 # Define a FileNotFoundError
 class FileNotFoundError(Exception):
     pass
 
 
+# Define a FileDeletedError
+class FileDeletedError(Exception):
+    pass
+
+
 def does_file_exist(file_path):
     return os.path.exists(file_path)
+
+
+def is_file_deleted(file_path):
+    file_name = file_path.split("/")[-1]
+    parent_dir = "/".join(file_path.split("/")[0:-1])
+    delete_file_path = parent_dir + "/DELETED_" + file_name
+    if file_name.startswith("DELETED_"):
+        return True
+    elif os.path.exists(delete_file_path):
+        return True
+    elif os.path.exists(file_path):
+        return False
+    else:
+        return False
 
 
 def get_file_content(file_path):
@@ -38,8 +61,23 @@ def get_file_path(key):
         return f"{DATA_DIR}/{key[0]}/{key[1]}"
 
 
+def delete_file(file_path):
+    file_name = file_path.split("/")[-1]
+    parent_dir = "/".join(file_path.split("/")[0:-1])
+    if file_name.startswith("DELETED_"):
+        # idempotent delete
+        return True
+    elif os.path.exists(file_path):
+        # Rename the file to DELETED_<file_name>
+        os.rename(file_path, parent_dir + "/DELETED_" + file_name)
+    else:
+        raise FileNotFoundError(f"File {file_path} not found")
+
+
 def get_checksum(content):
-    return content
+    # calculate checksum as a simple hash
+    checksum = hashlib.md5(content.encode()).hexdigest()
+    return checksum
 
 
 class PatchUtil:
@@ -51,7 +89,9 @@ class PatchUtil:
 
     # Prep a shadow cache for the file, return the shadow
     def register(self, key, content):
-        if key not in self.shadowCache and not does_file_exist(get_file_path(key)):
+        if is_file_deleted(get_file_path(key)):
+            raise FileDeletedError(f"File {key} is deleted")
+        elif key not in self.shadowCache and not does_file_exist(get_file_path(key)):
             print(f"Registering new file under {key}")
             save_file_content(get_file_path(key), content)
             self.shadowCache[key] = content
@@ -60,10 +100,19 @@ class PatchUtil:
             self.shadowCache[key] = content
         return self.shadowCache[key]
 
+    def delete(self, key):
+        if is_file_deleted(get_file_path(key)):
+            raise FileDeletedError(f"File {key} is deleted")
+        delete_file(get_file_path(key))
+        self.shadowCache.pop(key)
+        return True
+
     # Apply patches to the shadow and return a new set of patches to send back to the client
     def applyPatch(self, key, checksum, patch_block):
         dmp = diff_match_patch()
-        if key not in self.shadowCache and not does_file_exist(get_file_path(key)):
+        if is_file_deleted(get_file_path(key)):
+            raise FileDeletedError(f"File {key} is deleted")
+        elif key not in self.shadowCache and not does_file_exist(get_file_path(key)):
             print("Registering new file")
             self.shadowCache[key] = ""
             save_file_content(get_file_path(key), "")
@@ -75,7 +124,7 @@ class PatchUtil:
         patched_shadow, results = dmp.patch_apply(incoming_patches, shadow)
         if not all(results) or checksum != get_checksum(shadow):
             raise RuntimeError(
-                f"Patch failed to apply on shadow! Shadow was {shadow} and checksum was {checksum} for key {key}"
+                f"Patch failed to apply on shadow! Shadow was {get_checksum(shadow)} and checksum was {checksum} for key {key}"
             )
 
         # Do the final patching
@@ -114,6 +163,10 @@ class PatchUtil:
             for file in files:
                 path = f"{root_dir}/{file}"
                 # remove the data directory from the path
+                path = path.replace(f"\\", "/")
                 path = path.replace(f"{DATA_DIR}/{root}/", "")
                 paths.append(path)
         return paths
+
+    def getChecksum(self, key):
+        return get_checksum(self.shadowCache[key])
