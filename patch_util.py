@@ -1,8 +1,9 @@
 import hashlib
 import os
+import shelve
 from diff_match_patch import diff_match_patch
 
-DATA_DIR = "data"
+DATA_DIR = "/data"
 # Temporarily hardcoding the test file
 TEST_FILE = "test.md"
 
@@ -82,73 +83,79 @@ def get_checksum(content):
 
 class PatchUtil:
     # ToDo: Move shadow cache to a persistent store
-    shadowCache = {}
+    shadowPath = f"{DATA_DIR}/shadow"
 
     def __init__(self):
         pass
 
     # Prep a shadow cache for the file, return the shadow
     def register(self, key, content):
-        if is_file_deleted(get_file_path(key)):
-            raise FileDeletedError(f"File {key} is deleted")
-        elif key not in self.shadowCache and not does_file_exist(get_file_path(key)):
-            print(f"Registering new file under {key}")
-            save_file_content(get_file_path(key), content)
-            self.shadowCache[key] = content
-        elif key not in self.shadowCache:
-            print(f"Registering existing file under {key}")
-            self.shadowCache[key] = content
-        return self.shadowCache[key]
+        with shelve.open(self.shadowPath) as shadow:
+            if is_file_deleted(get_file_path(key)):
+                raise FileDeletedError(f"File {key} is deleted")
+            elif str(key) not in shadow and not does_file_exist(get_file_path(key)):
+                print(f"Registering new file under {key}")
+                save_file_content(get_file_path(key), content)
+                shadow[str(key)] = content
+            elif str(key) not in shadow:
+                print(f"Registering existing file under {key}")
+                shadow[str(key)] = content
+            return shadow[str(key)]
 
     def delete(self, key):
         if is_file_deleted(get_file_path(key)):
             raise FileDeletedError(f"File {key} is deleted")
         delete_file(get_file_path(key))
-        self.shadowCache.pop(key)
+        with shelve.open(self.shadowPath) as shadow:
+            shadow.pop(str(key), None)
         return True
 
     # Apply patches to the shadow and return a new set of patches to send back to the client
     def applyPatch(self, key, checksum, patch_block):
-        dmp = diff_match_patch()
-        if is_file_deleted(get_file_path(key)):
-            raise FileDeletedError(f"File {key} is deleted")
-        elif key not in self.shadowCache and not does_file_exist(get_file_path(key)):
-            print("Registering new file")
-            self.shadowCache[key] = ""
-            save_file_content(get_file_path(key), "")
-        elif key not in self.shadowCache:
-            raise RuntimeError(f"Key {key} not found in shadow cache")
-        # Perform patching
-        shadow = self.shadowCache[key]
-        incoming_patches = dmp.patch_fromText(patch_block)
-        patched_shadow, results = dmp.patch_apply(incoming_patches, shadow)
-        if not all(results) or checksum != get_checksum(shadow):
-            raise RuntimeError(
-                f"Patch failed to apply on shadow! Shadow was {get_checksum(shadow)} and checksum was {checksum} for key {key}"
-            )
+        # Load the shadow cache
 
-        # Do the final patching
-        text = get_file_content(get_file_path(key))
-        patched_text, _ = dmp.patch_apply(incoming_patches, text)
-        if patched_text != text:
-            save_file_content(get_file_path(key), patched_text)
+        with shelve.open(self.shadowPath) as shadowCache:
+            dmp = diff_match_patch()
+            if is_file_deleted(get_file_path(key)):
+                raise FileDeletedError(f"File {key} is deleted")
+            elif str(key) not in shadowCache and not does_file_exist(get_file_path(key)):
+                print("Registering new file")
+                shadowCache[key] = ""
+                save_file_content(get_file_path(key), "")
+            elif str(key) not in shadowCache:
+                raise RuntimeError(f"Key {key} not found in shadow cache")
+            # Perform patching
+            shadow = shadowCache[str(key)]
+            incoming_patches = dmp.patch_fromText(patch_block)
+            patched_shadow, results = dmp.patch_apply(incoming_patches, shadow)
+            if not all(results) or checksum != get_checksum(shadow):
+                raise RuntimeError(
+                    f"Patch failed to apply on shadow! Shadow was {get_checksum(shadow)} and checksum was {checksum} for key {key}"
+                )
 
-        # Get patches to send back to client
-        outgoing_patches = dmp.patch_make(patched_shadow, patched_text)
-        # Update shadow with patched text
-        self.shadowCache[key] = patched_text
-        # Return patches as a block
-        return dmp.patch_toText(outgoing_patches)
+            # Do the final patching
+            text = get_file_content(get_file_path(key))
+            patched_text, _ = dmp.patch_apply(incoming_patches, text)
+            if patched_text != text:
+                save_file_content(get_file_path(key), patched_text)
+
+            # Get patches to send back to client
+            outgoing_patches = dmp.patch_make(patched_shadow, patched_text)
+            # Update shadow with patched text
+            shadowCache[str(key)] = patched_text
+            # Return patches as a block
+            return dmp.patch_toText(outgoing_patches)
 
     # Called if applyPatch fails
     def getShadowContent(self, key):
-        if not key in self.shadowCache and not does_file_exist(get_file_path(key)):
-            raise FileNotFoundError(f"File not found for key {key}")
-        elif not key in self.shadowCache:
-            print("Key not found in shadow cache, using live file content")
-            self.shadowCache[key] = get_file_content(get_file_path(key))
-            return get_file_content(get_file_path(key))
-        return self.shadowCache[key]
+        with shelve.open(self.shadowPath) as shadow:
+            if not str(key) in shadow and not does_file_exist(get_file_path(key)):
+                raise FileNotFoundError(f"File not found for key {key}")
+            elif not str(key) in shadow:
+                print("Key not found in shadow cache, using live file content")
+                shadow[str(key)] = get_file_content(get_file_path(key))
+                return get_file_content(get_file_path(key))
+            return shadow[str(key)]
 
     def doesRootExist(self, root):
         return os.path.exists(f"{DATA_DIR}/{root}")
@@ -169,4 +176,5 @@ class PatchUtil:
         return paths
 
     def getChecksum(self, key):
-        return get_checksum(self.shadowCache[key])
+        with shelve.open(self.shadowPath) as shadow:
+            return get_checksum(shadow[str(key)])
